@@ -252,6 +252,12 @@ body {
   transform: translateY(0);
 }
 
+/* The component display rule above otherwise overrides the browser's hidden
+   attribute, which can leave an unavailable plan button visibly rendered. */
+.btn-dark[hidden] {
+  display: none !important;
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--text-primary);

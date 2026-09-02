@@ -163,9 +163,11 @@ async function initializePricingPage() {
  * @param {Object|null} discountQuote - Optional discount data
  */
 function updateCheckoutSummary(productData, discountQuote) {
-  const originalAmount = discountQuote?.originalAmount || productData.price_paise;
-  const discountAmount = discountQuote?.discountAmount || 0;
-  const finalAmount = discountQuote?.finalAmount || productData.price_paise;
+  // A valid 100% coupon has a final amount of zero. Use nullish fallbacks,
+  // not truthiness, so zero remains an intentional quoted price.
+  const originalAmount = discountQuote?.originalAmount ?? productData.price_paise;
+  const discountAmount = discountQuote?.discountAmount ?? 0;
+  const finalAmount = discountQuote?.finalAmount ?? productData.price_paise;
 
   // Update pricing display
   const originalEl = document.querySelector("#original");
@@ -181,6 +183,22 @@ function updateCheckoutSummary(productData, discountQuote) {
   if (payBtn) {
     payBtn.textContent = finalAmount === 0 ? "Activate Premium" : "Proceed to payment";
   }
+}
+
+async function fetchMyEntitlements(accessToken) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/get-my-entitlements`, {
+    headers: { Authorization: `Bearer ${accessToken}`, apikey: SUPABASE_ANON_KEY },
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data?.error || "Unable to load your active plans");
+  return Array.isArray(data?.entitlements) ? data.entitlements : [];
+}
+
+function activePlanForProduct(entitlements, productCode) {
+  return entitlements.find((entry) => {
+    const product = entry.products || {};
+    return product.code === productCode || product.all_access === true;
+  }) || null;
 }
 
 /**
@@ -229,8 +247,19 @@ async function applyReferralCode(referralCode, productCode) {
  * @param {string|null} referralCode - Optional referral code
  * @param {string} userToken - User's JWT auth token
  */
-async function proceedToPayment(productData, referralCode, userToken) {
+async function proceedToPayment(productData, referralCode, userToken, quote = null) {
   try {
+    if (quote?.finalAmount === 0 && quote.code === referralCode?.trim().toUpperCase()) {
+      const { data, error } = await supabaseClient.functions.invoke("redeem-free-referral", {
+        headers: { Authorization: `Bearer ${userToken}` },
+        body: { referralCode: quote.code, productCode: productData.code },
+      });
+      if (error || !data?.premium) throw new Error(data?.error || "Unable to activate this referral plan");
+      alert("Referral redeemed. Your plan is now active.");
+      location.href = "index.html";
+      return;
+    }
+
     // Create payment order
     const { data, error } = await supabaseClient.functions.invoke(
       "create-razorpay-order",
@@ -346,6 +375,15 @@ async function initializeCheckoutPage() {
       throw new Error("The selected product is unavailable.");
     }
 
+    let activePlan = null;
+    try {
+      activePlan = activePlanForProduct(await fetchMyEntitlements(userToken), product.code);
+    } catch (error) {
+      // Order creation independently enforces this rule server-side. Do not
+      // make checkout unusable merely because this optional UI lookup failed.
+      console.warn("Unable to pre-check active plans", error);
+    }
+
     // Show checkout panel
     const panel = document.querySelector("#checkout-panel");
     if (panel) panel.classList.remove("hidden");
@@ -378,15 +416,43 @@ async function initializeCheckoutPage() {
     const applyBtn = document.querySelector("#apply");
     const referralInput = document.querySelector("#referral");
 
+    if (activePlan) {
+      const activeProduct = activePlan.products || {};
+      const planName = activeProduct.name || activeProduct.code || "this plan";
+      const expiry = new Date(activePlan.expires_at).toLocaleDateString("en-IN", {
+        day: "numeric", month: "short", year: "numeric",
+      });
+      if (referralInput) referralInput.disabled = true;
+      if (applyBtn) applyBtn.hidden = true;
+      const quoteEl = document.querySelector("#quote");
+      if (quoteEl) quoteEl.textContent = `${planName} is already active until ${expiry}.`;
+      const payBtn = document.querySelector("#pay");
+      if (payBtn) {
+        payBtn.disabled = true;
+        payBtn.textContent = "Plan already active";
+      }
+      return;
+    }
+
+    let currentQuote = null;
+
     if (applyBtn) {
       applyBtn.addEventListener("click", async () => {
         const referralCode = referralInput?.value.trim();
         if (referralCode) {
           const quote = await applyReferralCode(referralCode, product.code);
           if (quote) {
+            currentQuote = quote;
             updateCheckoutSummary(product, quote);
           }
         }
+      });
+    }
+
+    if (referralInput) {
+      referralInput.addEventListener("input", () => {
+        currentQuote = null;
+        updateCheckoutSummary(product, null);
       });
     }
 
@@ -395,7 +461,7 @@ async function initializeCheckoutPage() {
     if (payBtn) {
       payBtn.addEventListener("click", () => {
         const referralCode = referralInput?.value.trim();
-        proceedToPayment(product, referralCode, userToken);
+        proceedToPayment(product, referralCode, userToken, currentQuote);
       });
     }
   } catch (error) {

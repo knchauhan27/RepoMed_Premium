@@ -52,8 +52,29 @@ async function handle(request: Request) {
   const productCode = typeof body?.productCode === "string" ? body.productCode.trim().toUpperCase() : "";
   if (!/^[A-Z_]{3,32}$/.test(productCode)) return reply(request, { error: "A valid product is required" }, 400);
   const { data: product, error: productError } = await admin
-    .from("products").select("id, code, name, price_paise, active").eq("code", productCode).eq("active", true).maybeSingle();
+    .from("products").select("id, code, name, price_paise, all_access, active").eq("code", productCode).eq("active", true).maybeSingle();
   if (productError || !product) return reply(request, { error: "This product is unavailable" }, 404);
+
+  // A purchase is not a renewal mechanism. Do not create a new provider order
+  // for an active copy of this product, or for a user who already has GOLD
+  // repository-wide access. This remains enforced even if a caller bypasses UI.
+  const { data: activeEntitlements, error: entitlementError } = await admin
+    .from("user_entitlements")
+    .select("product_id, products!inner(all_access)")
+    .eq("user_id", userData.user.id)
+    .eq("status", "active")
+    .is("revoked_at", null)
+    .lte("starts_at", new Date().toISOString())
+    .gt("expires_at", new Date().toISOString());
+  if (entitlementError) {
+    console.error("Unable to check existing product access", { userId: userData.user.id, message: entitlementError.message });
+    return reply(request, { error: "Unable to check current access" }, 500);
+  }
+  const alreadyCovered = (activeEntitlements ?? []).some((entry: any) =>
+    entry.product_id === product.id || (!product.all_access && entry.products?.all_access === true)
+  );
+  if (alreadyCovered) return reply(request, { error: "You already have active access to this plan" }, 409);
+
   const referralCode = typeof body?.referralCode === "string" && body.referralCode.trim()
     ? body.referralCode.trim() : null;
   let amount = product.price_paise;

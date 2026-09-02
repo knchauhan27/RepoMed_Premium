@@ -10,6 +10,13 @@ Deno.serve(async (request) => {
   if (typeof body?.referralCode !== "string" || !body.referralCode.trim() || body.referralCode.length > 64 || typeof body?.productCode !== "string") return response(request, { error: "Referral code or product is invalid" }, 400);
   const url = Deno.env.get("SUPABASE_URL") ?? ""; const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""; if (!url || !key) return response(request, { error: "Server configuration error" }, 500);
   const admin = createClient(url, key, { auth: { persistSession: false } }); const { data: auth, error: authError } = await admin.auth.getUser(authorization.slice(7)); if (authError || !auth?.user) return response(request, { error: "Invalid session" }, 401);
+  const productCode = body.productCode.trim().toUpperCase();
+  const { data: product, error: productError } = await admin.from("products").select("id,all_access").eq("code", productCode).eq("active", true).maybeSingle();
+  if (productError || !product) return response(request, { error: "Product is unavailable" }, 404);
+  const now = new Date().toISOString();
+  const { data: activeEntitlements, error: entitlementError } = await admin.from("user_entitlements").select("product_id,products!inner(all_access)").eq("user_id", auth.user.id).eq("status", "active").is("revoked_at", null).lte("starts_at", now).gt("expires_at", now);
+  if (entitlementError) return response(request, { error: "Unable to check current access" }, 500);
+  if ((activeEntitlements ?? []).some((entry: any) => entry.product_id === product.id || (!product.all_access && entry.products?.all_access === true))) return response(request, { error: "You already have active access to this plan" }, 409);
   const { data, error } = await admin.rpc("redeem_free_referral_code", { p_user_id: auth.user.id, p_code: body.referralCode, p_product_code: body.productCode });
   if (error || !data?.premium) return response(request, { error: error?.message || "Referral code is not valid" }, 400);
   return response(request, { premium: true, code: data.code, productCode: data.product_code, alreadyRedeemed: data.already_redeemed === true });
