@@ -18,20 +18,10 @@ async function checkAuthAndProtect() {
       // User is not authenticated
       console.log("User not authenticated. Redirecting to login...");
 
-      // Store the current page so we can redirect back after login
-      const currentSubject = new URLSearchParams(window.location.search).get(
-        "name",
-      );
-      if (currentSubject) {
-        sessionStorage.setItem(
-          "redirectAfterLogin",
-          `subject.html?name=${encodeURIComponent(currentSubject)}`,
-        );
-      }
-
-      // Redirect to home page with a flag to open sign-in modal
-      sessionStorage.setItem("openAuthModal", "true");
-      window.location.href = "index.html";
+      // Preserve the exact same-site page (including its query string) before
+      // opening the existing home-page login modal.
+      window.RepoMedAuth?.rememberReturnPath();
+      window.location.href = "index.html?auth=signin";
       return;
     }
 
@@ -57,3 +47,10 @@ document.addEventListener("visibilitychange", () => {
     checkAuthAndProtect();
   }
 });
+
+// Subject pages are protected content. A logout must immediately leave them.
+if (typeof supabaseClient !== "undefined") {
+  supabaseClient.auth.onAuthStateChange((event) => {
+    if (event === "SIGNED_OUT") window.location.href = "index.html";
+  });
+}

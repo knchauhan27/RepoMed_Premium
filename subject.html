@@ -71,7 +71,15 @@
             </svg>
             Export
           </button>
+          <button class="btn-dark" id="btn-get-premium" type="button" hidden>
+            Get Premium · ₹50
+          </button>
+          <div class="referral-control" id="referral-control" hidden>
+            <input id="referral-code" type="text" maxlength="64" placeholder="Referral code" aria-label="Referral code" />
+            <button class="btn-ghost" id="btn-apply-referral" type="button">Apply</button>
+          </div>
           <div class="auth-menu">
+            <button id="access-badge" class="btn-ghost" type="button" hidden title=""></button>
             <button id="sign-in-btn" class="btn-dark">Sign In</button>
             <div id="user-menu" class="user-menu hidden">
               <div class="user-email" id="user-email"></div>
@@ -305,6 +313,12 @@
           role="list"
           aria-label="Question cards"
         ></div>
+        <section class="preview-cta" id="preview-cta" hidden aria-live="polite">
+          <p class="preview-cta-eyebrow">You’ve reached the free preview</p>
+          <h2 id="preview-cta-title"></h2>
+          <p id="preview-cta-detail"></p>
+          <a class="btn-dark" id="preview-cta-link" href="pricing.html">View plan</a>
+        </section>
       </div>
     </main>
 
@@ -359,7 +373,7 @@
             </svg>
             <span>
               <strong>Export as PDF</strong>
-              <small>Cover page · Watermark · Footer</small>
+              <small>Server-verified · Daily quota applies</small>
             </span>
           </button>
           <button class="btn-export-opt btn-export-csv" id="btn-export-csv">
@@ -382,8 +396,8 @@
               <polyline points="10 9 9 9 8 9" />
             </svg>
             <span>
-              <strong>Export as CSV</strong>
-              <small>Raw data · Spreadsheet-ready</small>
+              <strong>CSV export unavailable</strong>
+              <small>Use secure PDF export</small>
             </span>
           </button>
         </div>
@@ -482,6 +496,8 @@
     </div>
 
     <!-- Supabase Configuration -->
+    <!-- Razorpay Standard Checkout; only the public Test Mode key is returned to this page. -->
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <script src="supabase-config.js"></script>
     <!-- Authentication Handler -->
     <script src="auth.js"></script>
@@ -516,6 +532,6 @@
     </script>
 
     <!-- Subject Page Script -->
-    <script src="subject.js"></script>
+    <script src="subject.js?v=access-debug-20260902"></script>
   </body>
 </html>

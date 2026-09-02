@@ -11,9 +11,10 @@
  *
  * Architecture:
  *   State   → Single source of truth for all filters/sort/search
- *   Data    → Loaded once, never mutated
- *   Derived → Filtered+sorted array computed from State
- *   Render  → Pure DOM update from Derived
+ *   Data    → Filtering, sorting, and pagination all happen server-side
+ *             (Edge Function); the browser only sends filter criteria and
+ *             renders whatever comes back.
+ *   Render  → Pure DOM update from State.allQuestions
  * ============================================================
  */
 
@@ -27,6 +28,10 @@ const State = (() => {
   let _state = {
     subject: "",
     allQuestions: [],
+    totalQuestions: 0,
+    pagination: { page: 0, limit: 250, hasMore: false },
+    filterOptions: { years: [], topics: [], subtopics: [], exams: [], marks: [], types: [] },
+    access: { isPremium: false, previewLimit: 10 },
     searchQuery: "",
     filters: {
       years: new Set(), // ← now multi-select Set
@@ -80,137 +85,207 @@ const State = (() => {
   };
 })();
 
+function buildQuestionRequest({ page = 0, pageSize = 250, includeOptions = true } = {}) {
+  const filters = State.get("filters");
+  const sort = State.getSort();
+  return {
+    subject: State.get("subject"),
+    years: [...filters.years],
+    topics: [...filters.topics],
+    subtopics: [...filters.subtopics],
+    exams: [...filters.exams],
+    marks: filters.marks || null,
+    types: [...filters.types],
+    search: State.get("searchQuery"),
+    sortBy: sort.by,
+    sortOrder: sort.order,
+    page,
+    pageSize,
+    includeOptions,
+  };
+}
+
+const DeviceIdentity = (() => {
+  const storageKey = "repomed_device_token_v1";
+  function token() {
+    let value = localStorage.getItem(storageKey);
+    if (/^[A-Za-z0-9_-]{32,128}$/.test(value || "")) return value;
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    value = btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+    localStorage.setItem(storageKey, value);
+    return value;
+  }
+  return { token };
+})();
+
 /* ============================================================
    MODULE: Data Loader
    ============================================================ */
 const DataLoader = (() => {
-  const SUBJECT_FILE_MAP = {
-    Anatomy: "anat.json",
-    Biochemistry: "biochem.json",
-    ENT: "ent.json",
-    FM: "fmt.json",
-    Medicine: "med.json",
-    Micro: "micro.json",
-    Obstetrics: "obs.json",
-    Gynaecology: "gynae.json",
-    Ophthal: "ophthal.json",
-    Patho: "patho.json",
-    Pediatrics: "pediatrics.json",
-    Pharmac: "pharmac.json",
-    Physiology: "physio.json",
-    "PSM/CM": "psm.json",
-    Surgery: "surgery.json",
-  };
-
-  async function loadData(subject) {
-    const filename = SUBJECT_FILE_MAP[subject];
-    if (!filename)
-      throw new Error(`No data file mapped for subject: "${subject}"`);
-    const response = await fetch(`./data/${filename}`);
-    if (!response.ok)
-      throw new Error(
-        `Failed to load ./data/${filename} — HTTP ${response.status}`,
-      );
-    return response.json();
+  async function loadData(paging) {
+    const { data, error } = await supabaseClient.functions.invoke(
+      "get-questions",
+      { body: buildQuestionRequest(paging), headers: { "x-repomed-device": DeviceIdentity.token() } },
+    );
+    if (error) throw error;
+    if (!data || !Array.isArray(data.questions) || typeof data.total !== "number") {
+      throw new Error("Question service returned an invalid response");
+    }
+    return data;
   }
 
   return { loadData };
 })();
 
-/* ============================================================
-   MODULE: Filter Engine
-   All pure functions — no side effects.
-   ============================================================ */
-const FilterEngine = (() => {
-  function uniqueSorted(arr, field, numeric = false) {
-    const vals = [
-      ...new Set(
-        arr
-          .map((q) => q[field])
-          .filter((v) => v !== undefined && v !== null && v !== ""),
-      ),
-    ];
-    return numeric
-      ? vals.sort((a, b) => a - b)
-      : vals.sort((a, b) => String(a).localeCompare(String(b)));
+async function getFunctionErrorMessage(error, fallback) {
+  try {
+    if (error?.context instanceof Response) {
+      const body = await error.context.json();
+      return body.error || fallback;
+    }
+  } catch (_) {
+    // Use the safe fallback below when an error body is unavailable.
   }
+  return error?.message || fallback;
+}
 
-  /**
-   * getFilteredSet — applies ALL active filters + search.
-   * For multi-select Sets: empty Set = match all; non-empty = must be in Set.
-   */
-  function getFilteredSet(questions, filters, searchQuery) {
-    const { years, topics, subtopics, exams, marks, types } = filters;
-    const query = searchQuery.trim().toLowerCase();
-
-    return questions.filter((q) => {
-      if (years.size > 0 && !years.has(q.year)) return false;
-      if (topics.size > 0 && !topics.has(q.topic)) return false;
-      if (subtopics.size > 0 && !subtopics.has(q.subtopic)) return false;
-      if (exams.size > 0 && !exams.has(q.exam)) return false;
-      if (marks && String(q.marks) !== marks) return false;
-      if (types.size > 0 && !types.has(q.type)) return false;
-      if (query && !q.question.toLowerCase().includes(query)) return false;
-      return true;
-    });
-  }
-
-  /**
-   * getCascadePool — returns questions relevant for computing
-   * downstream filter options, applying only UPPER-level filters.
-   *
-   * level: 'topics' | 'subtopics' | 'marks'
-   */
-  function getCascadePool(questions, filters, level) {
-    const { years, topics, subtopics, exams, types } = filters;
-    const query = State.get("searchQuery").trim().toLowerCase();
-
-    return questions.filter((q) => {
-      if (types.size > 0 && !types.has(q.type)) return false;
-      if (exams.size > 0 && !exams.has(q.exam)) return false;
-      if (query && !q.question.toLowerCase().includes(query)) return false;
-
-      if (level === "topics") {
-        if (years.size > 0 && !years.has(q.year)) return false;
-      }
-      if (level === "subtopics") {
-        if (years.size > 0 && !years.has(q.year)) return false;
-        if (topics.size > 0 && !topics.has(q.topic)) return false;
-      }
-      if (level === "marks") {
-        if (years.size > 0 && !years.has(q.year)) return false;
-        if (topics.size > 0 && !topics.has(q.topic)) return false;
-        if (subtopics.size > 0 && !subtopics.has(q.subtopic)) return false;
-      }
-      return true;
-    });
-  }
-
-  function sortResults(arr, by, order) {
-    const dir = order === "asc" ? 1 : -1;
-    return [...arr].sort((a, b) => {
-      const av = a[by],
-        bv = b[by];
-      if (typeof av === "number") return (av - bv) * dir;
-      return String(av).localeCompare(String(bv)) * dir;
-    });
-  }
-
-  /**
-   * getLastNYears — returns the N most-recent years found in dataset (desc).
-   */
-  function getLastNYears(questions, n) {
-    const all = uniqueSorted(questions, "year", true);
-    return all.slice(-n); // last N from ascending list = most recent N
-  }
-
-  return {
-    uniqueSorted,
-    getFilteredSet,
-    getCascadePool,
-    sortResults,
-    getLastNYears,
+const PremiumPayment = (() => {
+  const subjectProducts = {
+    Anatomy: "EMBRYO", Physiology: "EMBRYO", Biochemistry: "EMBRYO",
+    Patho: "SYNAPSE", Pharmac: "SYNAPSE", Micro: "SYNAPSE",
+    "PSM/CM": "NEXUS", FM: "NEXUS", ENT: "NEXUS", Ophthal: "NEXUS",
+    Medicine: "APEX", Surgery: "APEX", Obstetrics: "APEX", Gynaecology: "APEX", Pediatrics: "APEX",
   };
+  async function validateReferral() {
+    const input = DOM.get("referral-code");
+    const code = input?.value.trim();
+    if (!code) return null;
+    const { data, error } = await supabaseClient.functions.invoke("validate-referral-code", { body: { referralCode: code } });
+    if (error || !data?.valid) throw new Error("Referral code is not valid or unavailable");
+    alert(`Referral ${data.code}: -₹${(data.discountAmount / 100).toFixed(2)}. You pay ₹${(data.finalAmount / 100).toFixed(2)}.`);
+    return { code: data.code, finalAmount: data.finalAmount };
+  }
+
+  function updateUi(access) {
+    const button = DOM.get("btn-get-premium");
+    if (!button) return;
+    const product = subjectProducts[State.get("subject")];
+    button.hidden = Boolean(access.isPremium) || !product;
+    button.disabled = false;
+    button.textContent = `View ${product} plan`;
+    const referralControl = DOM.get("referral-control");
+    if (referralControl) referralControl.hidden = Boolean(access.isPremium);
+  }
+
+  function renderPreviewCta(access) {
+    const panel = DOM.get("preview-cta");
+    const product = subjectProducts[State.get("subject")];
+    if (!panel || access?.isPremium || !product) { if (panel) panel.hidden = true; return; }
+    const planSubjects = {
+      EMBRYO: "Anatomy • Physiology • Biochemistry",
+      SYNAPSE: "Pathology • Pharmacology • Microbiology",
+      NEXUS: "PSM • FMT • ENT • Ophthalmology",
+      APEX: "Medicine • Surgery • OBGY • Pediatrics",
+    };
+    DOM.get("preview-cta-title").textContent = access?.reason === "subject_not_in_active_plan"
+      ? `Your current plan does not include ${State.get("subject")}.`
+      : `Unlock all ${State.get("subject")} PYQs with RepoMed ${product}.`;
+    DOM.get("preview-cta-detail").textContent = access?.reason === "subject_not_in_active_plan"
+      ? `Choose RepoMed ${product} for this subject. Includes ${planSubjects[product]} · ₹249/year`
+      : `Includes ${planSubjects[product]} · ₹249/year`;
+    DOM.get("preview-cta-link").href = `checkout.html?product=${encodeURIComponent(product)}`;
+    panel.hidden = false;
+  }
+
+  async function startCheckout() {
+    const button = DOM.get("btn-get-premium");
+    if (!button || button.disabled) return;
+    const product = subjectProducts[State.get("subject")];
+    if (product) {
+      window.location.href = `checkout.html?product=${encodeURIComponent(product)}`;
+      return;
+    }
+
+    try {
+      button.disabled = true;
+      button.textContent = "Preparing checkout…";
+      const referral = await validateReferral();
+      if (referral?.finalAmount === 0) {
+        const { data, error } = await supabaseClient.functions.invoke("redeem-free-referral", { body: { referralCode: referral.code } });
+        if (error || !data?.premium) throw new Error(await getFunctionErrorMessage(error, "Unable to redeem referral code"));
+        await applyAndRender();
+        alert("Referral redeemed. Premium access is now active.");
+        return;
+      }
+      const { data: order, error: orderError } = await supabaseClient.functions.invoke(
+        "create-razorpay-order",
+        { body: referral ? { referralCode: referral.code } : {} },
+      );
+      if (orderError) throw new Error(await getFunctionErrorMessage(orderError, "Unable to create payment order"));
+      if (!window.Razorpay) throw new Error("Razorpay Checkout did not load. Please refresh and try again.");
+
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      const checkout = new window.Razorpay({
+        key: order.keyId,
+        amount: order.amount,
+        currency: order.currency,
+        name: "RepoMed",
+        description: "Premium access (Test Mode)",
+        order_id: order.razorpayOrderId,
+        prefill: { email: session?.user?.email || "" },
+        theme: { color: "#5b4cf5" },
+        handler: async (paymentResponse) => {
+          try {
+            button.textContent = "Verifying payment…";
+            const { data: verification, error: verificationError } = await supabaseClient.functions.invoke(
+              "verify-razorpay-payment",
+              {
+                body: {
+                  paymentOrderId: order.paymentOrderId,
+                  razorpayPaymentId: paymentResponse.razorpay_payment_id,
+                  razorpayOrderId: paymentResponse.razorpay_order_id,
+                  razorpaySignature: paymentResponse.razorpay_signature,
+                },
+              },
+            );
+            if (verificationError || !verification?.premium) {
+              throw new Error(await getFunctionErrorMessage(verificationError, "Payment verification failed"));
+            }
+            await applyAndRender();
+            alert("Payment verified. Premium access is now active.");
+          } catch (error) {
+            alert(`Payment could not be verified: ${error.message}`);
+          } finally {
+            const access = State.get("access");
+            updateUi(access);
+          }
+        },
+        modal: { ondismiss: () => updateUi(State.get("access")) },
+      });
+      checkout.on("payment.failed", () => updateUi(State.get("access")));
+      checkout.open();
+    } catch (error) {
+      alert(`Unable to start payment: ${error.message}`);
+      updateUi(State.get("access"));
+    }
+  }
+
+  function wire() {
+    const button = DOM.get("btn-get-premium");
+    if (button && !button.dataset.listenerAdded) {
+      button.dataset.listenerAdded = "true";
+      button.addEventListener("click", startCheckout);
+    }
+    const applyButton = DOM.get("btn-apply-referral");
+    if (applyButton && !applyButton.dataset.listenerAdded) {
+      applyButton.dataset.listenerAdded = "true";
+      applyButton.addEventListener("click", async () => {
+        try { await validateReferral(); } catch (error) { alert(error.message); }
+      });
+    }
+  }
+
+  return { updateUi, renderPreviewCta, wire };
 })();
 
 /* ============================================================
@@ -314,8 +389,12 @@ const Renderer = (() => {
     list.innerHTML = "";
     list.appendChild(frag);
 
-    const total = State.get("allQuestions").length;
-    meta.innerHTML = `Showing <strong>${questions.length}</strong> of <strong>${total}</strong> questions`;
+    const total = State.get("totalQuestions");
+    const access = State.get("access");
+    const previewMessage = access.isPremium
+      ? ""
+      : ` · Preview mode: unlock Premium to view more than ${access.previewLimit} questions`;
+    meta.innerHTML = `Showing <strong>${questions.length}</strong> of <strong>${total}</strong> questions${previewMessage}`;
   }
 
   function buildCardHTML(q, searchQuery) {
@@ -347,33 +426,24 @@ const Renderer = (() => {
 
   /** Rebuild all filter chip groups + marks select (cascade-aware) */
   function renderFilterDropdowns() {
-    const all = State.get("allQuestions");
     const filters = State.get("filters");
+    const options = State.get("filterOptions");
 
-    // --- YEARS (multi-chip, full dataset, desc) ---
-    const years = FilterEngine.uniqueSorted(all, "year", true).reverse();
-    DOM.buildChipGroup(DOM.get("filter-year"), years, filters.years, (v) =>
+    // Filter options are returned by the protected server endpoint. They must
+    // not be derived from hidden question rows in the browser.
+    DOM.buildChipGroup(DOM.get("filter-year"), options.years, filters.years, (v) =>
       String(v),
     );
 
-    // --- TOPICS (multi-chip, cascade after years) ---
-    const topicPool = FilterEngine.getCascadePool(all, filters, "topics");
-    const topics = FilterEngine.uniqueSorted(topicPool, "topic");
-    DOM.buildChipGroup(DOM.get("filter-topic"), topics, filters.topics);
+    DOM.buildChipGroup(DOM.get("filter-topic"), options.topics, filters.topics);
 
-    // --- SUBTOPICS (multi-chip, cascade after years+topics) ---
-    const subtopicPool = FilterEngine.getCascadePool(all, filters, "subtopics");
-    const subtopics = FilterEngine.uniqueSorted(subtopicPool, "subtopic");
     DOM.buildChipGroup(
       DOM.get("filter-subtopic"),
-      subtopics,
+      options.subtopics,
       filters.subtopics,
     );
 
-    // --- EXAMS (multi-chip, non-cascading except by type/query/exam itself) ---
-    const examPool = FilterEngine.getCascadePool(all, filters, "marks");
-    const exams = FilterEngine.uniqueSorted(examPool, "exam");
-    DOM.buildChipGroup(DOM.get("filter-exam"), exams, filters.exams);
+    DOM.buildChipGroup(DOM.get("filter-exam"), options.exams, filters.exams);
 
     // Dim subtopic group if no topic selected
     const subWrap = DOM.get("filter-subtopic");
@@ -381,9 +451,7 @@ const Renderer = (() => {
     subWrap.style.pointerEvents = filters.topics.size === 0 ? "none" : "";
 
     // --- MARKS (single <select>, cascade after years+topics+subtopics) ---
-    const marksPool = FilterEngine.getCascadePool(all, filters, "marks");
-    const marks = FilterEngine.uniqueSorted(marksPool, "marks", true);
-    DOM.rebuildSelect(DOM.get("filter-marks"), marks, "All Marks", true);
+    DOM.rebuildSelect(DOM.get("filter-marks"), options.marks, "All Marks", true);
     DOM.get("filter-marks").value = filters.marks;
   }
 
@@ -426,298 +494,6 @@ const Renderer = (() => {
     renderFilterBadge,
   };
 })();
-
-/* ============================================================
-   MODULE: PDF Export  (requires jsPDF loaded globally)
-   ============================================================ */
-const PDFExport = (() => {
-  function cleanText(text) {
-    return String(text)
-      .replace(/\*\*/g, "")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\n+/g, " ")
-      .trim();
-  }
-
-  function addCoverPage(doc, subject, filters, userInfo) {
-    let y = 38;
-
-    // ── Title block ──
-    doc.setFontSize(24);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(30, 30, 30);
-    doc.text("RepoMed PYQ Repository", 105, y, { align: "center" });
-    y += 10;
-
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(100);
-    doc.text("Developed & Maintained by @brainspirebaroda", 105, y, {
-      align: "center",
-    });
-    y += 8;
-
-    doc.setFontSize(12);
-    doc.setTextColor(60);
-    doc.text("Best wishes for your examinations.", 105, y, { align: "center" });
-    y += 6;
-    doc.text("May consistent revision bring confidence and success.", 105, y, {
-      align: "center",
-    });
-    y += 16;
-
-    // ── User info (if available) ──
-    if (userInfo && (userInfo.displayName || userInfo.email)) {
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(80);
-      if (userInfo.displayName) {
-        doc.text(`Downloaded by: ${userInfo.displayName}`, 105, y, {
-          align: "center",
-        });
-        y += 6;
-      }
-      if (userInfo.email) {
-        doc.text(`Email: ${userInfo.email}`, 105, y, { align: "center" });
-        y += 6;
-      }
-      y += 4; // Extra space after user info
-    }
-
-    // ── Subject badge ──
-    doc.setFillColor(91, 76, 245);
-    doc.roundedRect(70, y, 70, 12, 3, 3, "F");
-    doc.setFontSize(13);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(255, 255, 255);
-    doc.text(subject, 105, y + 8.5, { align: "center" });
-    y += 22;
-
-    // ── Divider ──
-    doc.setDrawColor(220);
-    doc.line(20, y, 190, y);
-    y += 10;
-
-    // ── Applied Filters table ──
-    doc.setFontSize(13);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(30, 30, 30);
-    doc.text("Applied Filters", 20, y);
-    y += 9;
-
-    const rows = [
-      ["Years", filters.years || "All"],
-      ["Topics", filters.topics || "All"],
-      ["Subtopics", filters.subtopics || "All"],
-      ["Exams", filters.exams || "All"],
-      ["Marks", filters.marks || "All"],
-      ["Types", filters.types || "All"],
-    ];
-
-    doc.setFont("helvetica", "normal");
-    rows.forEach(([label, value]) => {
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(80);
-      doc.text(`${label}:`, 24, y);
-
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(30);
-      const wrapped = doc.splitTextToSize(value, 140);
-      doc.text(wrapped, 60, y);
-      y += wrapped.length * 6 + 2;
-    });
-
-    y += 6;
-    doc.setDrawColor(220);
-    doc.line(20, y, 190, y);
-
-    // ── Bottom note ──
-    doc.setFontSize(9);
-    doc.setTextColor(140);
-    doc.text(
-      "Generated for academic use only. Not for commercial redistribution.",
-      105,
-      268,
-      { align: "center" },
-    );
-    doc.text("brainspirebaroda@gmail.com  |  www.repomed.in", 105, 274, {
-      align: "center",
-    });
-  }
-
-  function addFooters(doc) {
-    const pageCount = doc.getNumberOfPages();
-    const date = new Date().toLocaleString();
-    for (let i = 1; i <= pageCount; i++) {
-      doc.setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(150);
-      doc.text(
-        `brainspirebaroda@gmail.com  |  www.repomed.in  |  Downloaded: ${date}`,
-        10,
-        291,
-      );
-      doc.text(`Page ${i} of ${pageCount}`, 195, 291, { align: "right" });
-      // thin line above footer
-      doc.setDrawColor(220);
-      doc.line(10, 287, 200, 287);
-    }
-  }
-
-  function addWatermark(doc) {
-    const pageCount = doc.getNumberOfPages();
-    const gState = new doc.GState({ opacity: 0.07 });
-    const pw = doc.internal.pageSize.getWidth();
-    const ph = doc.internal.pageSize.getHeight();
-
-    for (let i = 1; i <= pageCount; i++) {
-      doc.setPage(i);
-      doc.saveGraphicsState();
-      doc.setGState(gState);
-      doc.setFontSize(80);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(80, 80, 80);
-      doc.text("BRAINSPIRE", pw / 2 + 30, ph / 2 + 60, {
-        angle: 45,
-        align: "center",
-      });
-      doc.restoreGraphicsState();
-    }
-  }
-
-  function groupByTopic(arr) {
-    const map = {};
-    arr.forEach((q) => {
-      if (!map[q.topic]) map[q.topic] = [];
-      map[q.topic].push(q);
-    });
-    return map;
-  }
-
-  function generate(filteredQuestions, subject, filterSummary, userInfo) {
-    if (!window.jspdf) {
-      alert(
-        "jsPDF library not loaded. Add the jsPDF <script> tag to subject.html.",
-      );
-      return;
-    }
-    if (filteredQuestions.length === 0) {
-      alert("No questions to export. Adjust your filters first.");
-      return;
-    }
-
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ unit: "mm", format: "a4" });
-
-    // ── PAGE 1: Cover ──
-    addCoverPage(doc, subject, filterSummary, userInfo);
-
-    // ── PAGE 2+: Content ──
-    doc.addPage();
-    let y = 14;
-
-    const grouped = groupByTopic(filteredQuestions);
-
-    Object.keys(grouped)
-      .sort()
-      .forEach((topic) => {
-        // Topic heading
-        if (y > 265) {
-          doc.addPage();
-          y = 14;
-        }
-
-        doc.setFillColor(237, 233, 254); // accent-light
-        doc.roundedRect(10, y - 4, 190, 9, 2, 2, "F");
-        doc.setFontSize(11);
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(91, 76, 245);
-        doc.text(cleanText(topic), 14, y + 2.5);
-        y += 10;
-
-        let qNo = 1;
-        grouped[topic].forEach((q) => {
-          doc.setFontSize(9.5);
-          doc.setFont("helvetica", "normal");
-          doc.setTextColor(30, 30, 30);
-
-          const meta = `(${q.exam}, ${q.year}, ${q.marks}m, P${q.part || "—"}, ${cleanText(q.subtopic)})`;
-          const line = `${qNo}. ${cleanText(q.question)}`;
-          const wrapped = doc.splitTextToSize(line, 178);
-
-          // Page break check
-          if (y + wrapped.length * 5 + 6 > 283) {
-            doc.addPage();
-            y = 14;
-          }
-
-          // Question text
-          doc.text(wrapped, 14, y);
-          y += wrapped.length * 5;
-
-          // Meta pill line
-          doc.setFontSize(8);
-          doc.setTextColor(130);
-          doc.text(meta, 16, y);
-          y += 6.5;
-
-          qNo++;
-        });
-
-        y += 4; // gap between topics
-      });
-
-    // ── Watermark + Footers (applied to all pages) ──
-    addWatermark(doc);
-    addFooters(doc);
-
-    const filename = `${subject}_PYQs_RepoMed.pdf`;
-    doc.save(filename);
-  }
-
-  return { generate };
-})();
-
-/* ============================================================
-   MODULE: CSV Export
-   ============================================================ */
-function exportCSV(filteredRows, subject) {
-  if (filteredRows.length === 0) {
-    alert("No questions to export.");
-    return;
-  }
-  const headers = [
-    "id",
-    "college",
-    "subject",
-    "part",
-    "year",
-    "exam",
-    "marks",
-    "type",
-    "topic",
-    "subtopic",
-    "question",
-  ];
-  const lines = [
-    headers.join(","),
-    ...filteredRows.map((q) =>
-      headers
-        .map((h) => `"${String(q[h] ?? "").replace(/"/g, '""')}"`)
-        .join(","),
-    ),
-  ];
-  const blob = new Blob([lines.join("\n")], {
-    type: "text/csv;charset=utf-8;",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${subject}_PYQs.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 /* ============================================================
    MODULE: Event Handlers
@@ -790,7 +566,7 @@ const Events = (() => {
 
     // ── Last 5 / Last 10 years ──
     DOM.get("btn-last5").addEventListener("click", () => {
-      const top5 = FilterEngine.getLastNYears(State.get("allQuestions"), 5);
+      const top5 = State.get("filterOptions").years.slice(0, 5);
       State.setSetFilter("years", top5);
       State.setSetFilter("topics", []);
       State.setSetFilter("subtopics", []);
@@ -798,7 +574,7 @@ const Events = (() => {
     });
 
     DOM.get("btn-last10").addEventListener("click", () => {
-      const top10 = FilterEngine.getLastNYears(State.get("allQuestions"), 10);
+      const top10 = State.get("filterOptions").years.slice(0, 10);
       State.setSetFilter("years", top10);
       State.setSetFilter("topics", []);
       State.setSetFilter("subtopics", []);
@@ -887,74 +663,126 @@ function debounce(fn, delay) {
   };
 }
 
-function getFilteredAndSorted() {
-  const all = State.get("allQuestions");
-  const filters = State.get("filters");
-  const query = State.get("searchQuery");
-  const sort = State.getSort();
-  return FilterEngine.sortResults(
-    FilterEngine.getFilteredSet(all, filters, query),
-    sort.by,
-    sort.order,
-  );
-}
+async function triggerPDFExport() {
+  const exportButton = DOM.get("btn-export");
+  const pdfButton = DOM.get("btn-export-pdf");
+  const originalLabel = pdfButton.querySelector("strong")?.textContent || "Export as PDF";
 
-function buildFilterSummary() {
-  const f = State.get("filters");
-  return {
-    years: f.years.size ? [...f.years].sort((a, b) => b - a).join(", ") : "All",
-    topics: f.topics.size ? [...f.topics].sort().join(", ") : "All",
-    subtopics: f.subtopics.size ? [...f.subtopics].sort().join(", ") : "All",
-    exams: f.exams.size ? [...f.exams].sort().join(", ") : "All",
-    marks: f.marks ? `${f.marks}m` : "All",
-    types: f.types.size ? [...f.types].sort().join(", ") : "All",
-  };
-}
+  try {
+    exportButton.disabled = true;
+    pdfButton.disabled = true;
+    const label = pdfButton.querySelector("strong");
+    if (label) label.textContent = "Generating secure PDF…";
 
-function triggerPDFExport() {
-  // Get current user
-  supabaseClient.auth
-    .getSession()
-    .then(({ data: { session } }) => {
-      let userInfo = null;
-      if (session && session.user) {
-        const user = session.user;
-        userInfo = {
-          displayName: user.user_metadata?.full_name || user.email,
-          email: user.email,
-        };
-      }
-      PDFExport.generate(
-        getFilteredAndSorted(),
-        State.get("subject"),
-        buildFilterSummary(),
-        userInfo,
-      );
-    })
-    .catch((error) => {
-      console.error("Error fetching session:", error);
-      // Continue without user info
-      PDFExport.generate(
-        getFilteredAndSorted(),
-        State.get("subject"),
-        buildFilterSummary(),
-        null,
-      );
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session?.access_token) throw new Error("Please sign in to export questions");
+
+    // Only filter criteria leave the browser. The Edge Function independently
+    // retrieves the questions, validates Premium/device access, and reserves
+    // a daily quota slot before generating the document.
+    const request = buildQuestionRequest({ includeOptions: false });
+    delete request.page;
+    delete request.pageSize;
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/export-questions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        apikey: SUPABASE_ANON_KEY,
+        "Content-Type": "application/json",
+        "x-repomed-device": DeviceIdentity.token(),
+      },
+      body: JSON.stringify(request),
     });
+
+    if (!response.ok) {
+      let message = "Unable to generate the PDF";
+      try {
+        const payload = await response.json();
+        if (typeof payload?.error === "string") message = payload.error;
+      } catch (_) {
+        // Keep the safe fallback for a malformed error response.
+      }
+      throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("The generated PDF was empty");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${State.get("subject").replace(/[^A-Za-z0-9_-]/g, "_")}_PYQs_RepoMed.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error("Secure PDF export failed:", error);
+    alert(error instanceof Error ? error.message : "Unable to generate the PDF");
+  } finally {
+    exportButton.disabled = !State.get("access")?.isPremium;
+    pdfButton.disabled = false;
+    const label = pdfButton.querySelector("strong");
+    if (label) label.textContent = originalLabel;
+  }
 }
 
 function triggerCSVExport() {
-  exportCSV(getFilteredAndSorted(), State.get("subject"));
+  // A client-side CSV would evade the server's entitlement and quota checks.
+  alert("CSV export is not available. Use the secure PDF export instead.");
 }
 
 /* ============================================================
    CORE: applyAndRender
    ============================================================ */
-function applyAndRender() {
-  const sorted = getFilteredAndSorted();
-  Renderer.renderCards(sorted, State.get("searchQuery"));
+let latestRequest = 0;
+async function applyAndRender() {
+  const requestId = ++latestRequest;
+  const response = await DataLoader.loadData({ page: 0, pageSize: 250, includeOptions: true });
+  if (requestId !== latestRequest) return;
+
+  State.set("allQuestions", response.questions);
+  State.set("totalQuestions", response.total);
+  State.set("pagination", { page: response.page ?? 0, limit: response.limit ?? 250, hasMore: response.hasMore === true });
+  if (response.options) State.set("filterOptions", response.options);
+  State.set("access", response.access);
+
+  // Questions remain paginated at the Edge Function, but premium users should
+  // finish with every row matching their current filter—not merely page one.
+  if (response.access?.isPremium && response.hasMore) {
+    DOM.get("results-meta").textContent = "Loading all matching questions…";
+    await loadRemainingPremiumPages(requestId);
+    if (requestId !== latestRequest) return;
+  }
+
+  PremiumPayment.updateUi(response.access);
+  PremiumPayment.renderPreviewCta(response.access);
+  const exportButton = DOM.get("btn-export");
+  exportButton.disabled = !response.access.isPremium;
+  exportButton.title = response.access.isPremium
+    ? "Export the current filtered results"
+    : "Premium access is required to export questions";
+  Renderer.renderCards(State.get("allQuestions"), State.get("searchQuery"));
   Renderer.renderFilterDropdowns();
   Renderer.renderFilterBadge();
+}
+
+async function loadRemainingPremiumPages(requestId) {
+  while (requestId === latestRequest && State.get("pagination").hasMore) {
+    const paging = State.get("pagination");
+    const response = await DataLoader.loadData({
+      page: paging.page + 1,
+      pageSize: paging.limit,
+      includeOptions: false,
+    });
+    if (requestId !== latestRequest) return;
+    if (!response.access?.isPremium) throw new Error("Premium access is required to load more questions");
+
+    const existing = State.get("allQuestions");
+    const existingIds = new Set(existing.map((question) => question.id));
+    State.set("allQuestions", [...existing, ...response.questions.filter((question) => !existingIds.has(question.id))]);
+    State.set("totalQuestions", response.total);
+    State.set("pagination", { page: response.page, limit: response.limit, hasMore: response.hasMore === true });
+  }
 }
 
 /* ============================================================
@@ -978,6 +806,7 @@ async function updateAuthUI() {
       signInBtn.style.display = "none";
       userMenu.classList.remove("hidden");
       userEmail.textContent = session.user.email || "Account";
+      await updateEntitlementBadge(session);
 
       // Set up logout handler
       if (logoutBtn && !logoutBtn.dataset.listenerAdded) {
@@ -1012,9 +841,32 @@ async function updateAuthUI() {
       // User is not logged in
       signInBtn.style.display = "block";
       userMenu.classList.add("hidden");
+      const accessBadge = document.getElementById("access-badge");
+      if (accessBadge) accessBadge.hidden = true;
     }
   } catch (error) {
     console.error("Error updating auth UI:", error);
+  }
+}
+
+async function updateEntitlementBadge(session) {
+  const badge = document.getElementById("access-badge");
+  if (!badge || !session?.access_token) return;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/get-my-entitlements`, {
+      headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_ANON_KEY },
+    });
+    const payload = await response.json();
+    const entitlements = payload?.entitlements || [];
+    if (!entitlements.length) { badge.hidden = true; return; }
+    const gold = entitlements.find((entry) => entry.products?.code === "GOLD");
+    badge.hidden = false;
+    badge.textContent = gold ? "GOLD" : `${entitlements.length} Plan${entitlements.length > 1 ? "s" : ""}`;
+    badge.title = entitlements.map((entry) => `${entry.products?.code || "Plan"}: valid until ${new Date(entry.expires_at).toLocaleDateString("en-IN")}`).join("\n");
+    badge.style.color = gold ? "#9a6700" : "";
+  } catch (error) {
+    console.warn("Unable to load entitlement badge", error);
+    badge.hidden = true;
   }
 }
 
@@ -1044,24 +896,24 @@ async function init() {
   }
 
   try {
-    const subjectData = await DataLoader.loadData(subject);
-    State.set("allQuestions", subjectData);
+    await applyAndRender();
 
-    const allTypes = [...new Set(subjectData.map((q) => q.type))].sort();
+    const allTypes = State.get("filterOptions").types;
     Events.setAllTypes(allTypes);
     Renderer.renderTypeChips(allTypes);
 
     Events.wireAll();
+    PremiumPayment.wire();
 
     DOM.get("loading-state").hidden = true;
-    applyAndRender();
   } catch (err) {
     DOM.get("loading-state").hidden = true;
+    const message = await getFunctionErrorMessage(err, "Failed to load questions. Please refresh the page.");
     DOM.get("questions-list").innerHTML =
       `<p style="color:#ef4444;padding:32px 0;text-align:center">
-        Failed to load questions. Please refresh the page.
+        ${DOM.escHtml(message)}
        </p>`;
-    console.error("[RepoMed] Data load error:", err);
+    console.error("[RepoMed] Data load error:", { message, error: err });
   }
 }
 

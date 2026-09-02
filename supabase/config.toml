@@ -1,0 +1,32 @@
+# get-questions verifies the caller itself with admin.auth.getUser(token),
+# allowing it to return the explicit CORS headers for every response path.
+[functions.get-questions]
+verify_jwt = false
+
+[functions.create-razorpay-order]
+verify_jwt = false
+
+[functions.verify-razorpay-payment]
+verify_jwt = false
+
+# Razorpay calls this endpoint directly and authenticates via its own HMAC
+# signature, verified against RAZORPAY_WEBHOOK_SECRET in the function.
+[functions.razorpay-webhook]
+verify_jwt = false
+
+[functions.validate-referral-code]
+verify_jwt = false
+
+[functions.redeem-free-referral]
+verify_jwt = false
+
+# The export function validates the caller manually so CORS headers are also
+# returned for authentication and quota errors.
+[functions.export-questions]
+verify_jwt = false
+
+[functions.get-products]
+verify_jwt = false
+
+[functions.get-my-entitlements]
+verify_jwt = false

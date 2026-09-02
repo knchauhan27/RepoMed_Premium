@@ -1,0 +1,18 @@
+{
+  "tasks": {
+    "test": "deno test --allow-read --allow-env",
+    "lint": "deno lint",
+    "fmt": "deno fmt"
+  },
+  "imports": {
+    "std/": "https://deno.land/std@0.208.0/",
+    "supabase": "https://esm.sh/@supabase/supabase-js@2",
+    "crypto": "https://deno.land/std@0.208.0/crypto/mod.ts"
+  },
+  "compilerOptions": {
+    "lib": [
+      "deno.window",
+      "dom"
+    ]
+  }
+}
