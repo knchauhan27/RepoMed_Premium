@@ -21,7 +21,7 @@ test("an active unexpired entitlement receives paginated premium access", () => 
   assert.equal(hasActiveEntitlement({ status: "active", expires_at: "2026-10-01T00:00:00Z", revoked_at: null }, now), true);
   assert.equal(hasActiveEntitlement({ status: "active", expires_at: null, revoked_at: null }, now), true);
   assert.equal(resolveResultLimit(true, 500), PREMIUM_PAGE_LIMIT);
-  assert.equal(PREMIUM_PAGE_LIMIT, 250);
+  assert.equal(PREMIUM_PAGE_LIMIT, 500);
   assert.equal(resolveResultLimit(true, 25), 25);
   assert.equal(resolveOffset(true, 2, 25), 50);
 });

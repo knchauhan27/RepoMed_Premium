@@ -6,8 +6,8 @@
  * Changes in v3:
  *   • Year, Topic, Subtopic → multi-select chip groups (like Type)
  *   • "Last 5 Years" / "Last 10 Years" quick-select buttons
- *   • PDF export via jsPDF (cover page + watermark + footer)
- *   • CSV export retained
+ *   • Secure server-side PDF export (daily quota enforced)
+ *   • CSV export intentionally unavailable to protect the repository
  *
  * Architecture:
  *   State   → Single source of truth for all filters/sort/search
@@ -28,9 +28,13 @@ const State = (() => {
   let _state = {
     subject: "",
     allQuestions: [],
+    // Total rows in the selected subject before filters are applied.
+    subjectTotal: null,
+    // Total rows matching the current filters/search.
     totalQuestions: 0,
-    pagination: { page: 0, limit: 250, hasMore: false },
+    pagination: { page: 0, limit: 500, hasMore: false },
     filterOptions: { years: [], topics: [], subtopics: [], exams: [], marks: [], types: [] },
+    filterOptionsLoaded: false,
     access: { isPremium: false, previewLimit: 10 },
     searchQuery: "",
     filters: {
@@ -85,7 +89,20 @@ const State = (() => {
   };
 })();
 
-function buildQuestionRequest({ page = 0, pageSize = 250, includeOptions = true } = {}) {
+function hasActiveQuestionFilters() {
+  const filters = State.get("filters");
+  return Boolean(
+    State.get("searchQuery").trim() ||
+    filters.years.size ||
+    filters.topics.size ||
+    filters.subtopics.size ||
+    filters.exams.size ||
+    filters.types.size ||
+    filters.marks,
+  );
+}
+
+function buildQuestionRequest({ page = 0, pageSize = 500, includeOptions = false, includeTotal = page === 0 } = {}) {
   const filters = State.get("filters");
   const sort = State.getSort();
   return {
@@ -102,6 +119,7 @@ function buildQuestionRequest({ page = 0, pageSize = 250, includeOptions = true 
     page,
     pageSize,
     includeOptions,
+    includeTotal,
   };
 }
 
@@ -128,7 +146,7 @@ const DataLoader = (() => {
       { body: buildQuestionRequest(paging), headers: { "x-repomed-device": DeviceIdentity.token() } },
     );
     if (error) throw error;
-    if (!data || !Array.isArray(data.questions) || typeof data.total !== "number") {
+    if (!data || !Array.isArray(data.questions) || (data.total !== null && typeof data.total !== "number")) {
       throw new Error("Question service returned an invalid response");
     }
     return data;
@@ -305,12 +323,15 @@ const Renderer = (() => {
     list.innerHTML = "";
     list.appendChild(frag);
 
-    const total = State.get("totalQuestions");
+    const filteredTotal = State.get("totalQuestions");
+    const subjectTotal = State.get("subjectTotal") ?? filteredTotal;
+    const hasFilters = hasActiveQuestionFilters();
     const access = State.get("access");
     const previewMessage = access.isPremium
       ? ""
       : ` · Preview mode: unlock Premium to view more than ${access.previewLimit} questions`;
-    meta.innerHTML = `Showing <strong>${questions.length}</strong> of <strong>${total}</strong> questions${previewMessage}`;
+    const filterMessage = hasFilters ? ` · <strong>${filteredTotal}</strong> match filters` : "";
+    meta.innerHTML = `Showing <strong>${questions.length}</strong> of <strong>${subjectTotal}</strong> questions${filterMessage}${previewMessage}`;
   }
 
   function buildCardHTML(q, searchQuery) {
@@ -514,7 +535,7 @@ const Events = (() => {
         State.set("searchQuery", e.target.value);
         DOM.get("search-clear").hidden = !e.target.value;
         applyAndRender();
-      }, 200),
+      }, 350),
     );
 
     DOM.get("search-clear").addEventListener("click", () => {
@@ -651,15 +672,19 @@ function triggerCSVExport() {
    CORE: applyAndRender
    ============================================================ */
 let latestRequest = 0;
-async function applyAndRender() {
+async function applyAndRender({ includeOptions = !State.get("filterOptionsLoaded") } = {}) {
   const requestId = ++latestRequest;
-  const response = await DataLoader.loadData({ page: 0, pageSize: 250, includeOptions: true });
+  const response = await DataLoader.loadData({ page: 0, pageSize: 500, includeOptions });
   if (requestId !== latestRequest) return;
 
   State.set("allQuestions", response.questions);
   State.set("totalQuestions", response.total);
-  State.set("pagination", { page: response.page ?? 0, limit: response.limit ?? 250, hasMore: response.hasMore === true });
-  if (response.options) State.set("filterOptions", response.options);
+  if (!hasActiveQuestionFilters()) State.set("subjectTotal", response.total);
+  State.set("pagination", { page: response.page ?? 0, limit: response.limit ?? 500, hasMore: response.hasMore === true });
+  if (response.options) {
+    State.set("filterOptions", response.options);
+    State.set("filterOptionsLoaded", true);
+  }
   State.set("access", response.access);
 
   // Questions remain paginated at the Edge Function, but premium users should
@@ -683,22 +708,38 @@ async function applyAndRender() {
 }
 
 async function loadRemainingPremiumPages(requestId) {
-  while (requestId === latestRequest && State.get("pagination").hasMore) {
-    const paging = State.get("pagination");
-    const response = await DataLoader.loadData({
-      page: paging.page + 1,
-      pageSize: paging.limit,
-      includeOptions: false,
-    });
-    if (requestId !== latestRequest) return;
-    if (!response.access?.isPremium) throw new Error("Premium access is required to load more questions");
+  const { limit } = State.get("pagination");
+  const total = State.get("totalQuestions");
+  const remainingPages = Array.from(
+    { length: Math.max(0, Math.ceil(total / limit) - 1) },
+    (_, index) => index + 1,
+  );
 
-    const existing = State.get("allQuestions");
-    const existingIds = new Set(existing.map((question) => question.id));
-    State.set("allQuestions", [...existing, ...response.questions.filter((question) => !existingIds.has(question.id))]);
-    State.set("totalQuestions", response.total);
-    State.set("pagination", { page: response.page, limit: response.limit, hasMore: response.hasMore === true });
-  }
+  // Fetch a small bounded batch in parallel. This preserves server-side
+  // pagination/access enforcement, while removing the serial network wait for
+  // large subjects (for example, 1,600 rows no longer needs seven round trips).
+  const concurrency = 3;
+  const responses = new Array(remainingPages.length);
+  let nextPageIndex = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, remainingPages.length) }, async () => {
+    while (nextPageIndex < remainingPages.length && requestId === latestRequest) {
+      const pageIndex = nextPageIndex++;
+      const response = await DataLoader.loadData({
+        page: remainingPages[pageIndex],
+        pageSize: limit,
+        includeOptions: false,
+      });
+      if (!response.access?.isPremium) throw new Error("Premium access is required to load more questions");
+      responses[pageIndex] = response;
+    }
+  }));
+  if (requestId !== latestRequest) return;
+
+  const existingIds = new Set(State.get("allQuestions").map((question) => question.id));
+  const additionalQuestions = responses.flatMap((response) => response.questions)
+    .filter((question) => !existingIds.has(question.id));
+  State.set("allQuestions", [...State.get("allQuestions"), ...additionalQuestions]);
+  State.set("pagination", { page: remainingPages.at(-1) ?? 0, limit, hasMore: false });
 }
 
 /* ============================================================

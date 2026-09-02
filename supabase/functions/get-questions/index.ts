@@ -15,6 +15,7 @@ type RequestBody = {
   page?: unknown;
   pageSize?: unknown;
   includeOptions?: unknown;
+  includeTotal?: unknown;
 };
 
 const defaultAllowedOrigins =
@@ -119,6 +120,7 @@ function normalizeRequest(body: RequestBody) {
     page: body.page,
     pageSize: body.pageSize,
     includeOptions: body.includeOptions !== false,
+    includeTotal: body.includeTotal !== false,
   };
 }
 
@@ -142,15 +144,21 @@ async function sha256Hex(value: string) {
 async function validatePremiumDevice(admin: any, userId: string, deviceToken: string) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(deviceToken)) return { allowed: false, status: 403, error: "This premium account needs a registered device" };
   const tokenHash = await sha256Hex(deviceToken);
-  const { data: existing, error: lookupError } = await admin.from("devices").select("id, token_hash").eq("user_id", userId).is("revoked_at", null).maybeSingle();
+  const { data: existing, error: lookupError } = await admin.from("devices").select("id, token_hash, last_seen_at").eq("user_id", userId).is("revoked_at", null).maybeSingle();
   if (lookupError) {
     console.error("Unable to look up premium device", { userId, message: lookupError.message });
     return { allowed: false, status: 500, error: "Unable to validate this device" };
   }
   if (existing) {
     if (existing.token_hash !== tokenHash) return { allowed: false, status: 403, error: "Premium access is limited to one registered device. Replace the existing device to continue." };
-    const { error } = await admin.from("devices").update({ last_seen_at: new Date().toISOString() }).eq("id", existing.id);
-    return error ? { allowed: false, status: 500, error: "Unable to validate this device" } : { allowed: true };
+    const lastSeen = Date.parse(existing.last_seen_at ?? "");
+    // The device is authenticated on every request; only the audit timestamp
+    // needs throttling. Avoid a write for every loaded page/filter request.
+    if (Number.isNaN(lastSeen) || Date.now() - lastSeen >= 6 * 60 * 60 * 1000) {
+      const { error } = await admin.from("devices").update({ last_seen_at: new Date().toISOString() }).eq("id", existing.id);
+      return error ? { allowed: false, status: 500, error: "Unable to validate this device" } : { allowed: true };
+    }
+    return { allowed: true };
   }
   const { error: insertError } = await admin.from("devices").insert({ user_id: userId, token_hash: tokenHash, label: "browser" });
   if (!insertError) return { allowed: true };
@@ -254,20 +262,27 @@ async function handleRequest(request: Request) {
   }
   const pageSize = resolveResultLimit(isPremium, filters.pageSize);
   const offset = resolveOffset(isPremium, filters.page, pageSize);
-  const result = await applyFilters(
-    admin.from("questions").select("id, college, subject, part, year, exam, marks, type, topic, subtopic, question", { count: "exact" }),
+  const resultPromise = applyFilters(
+    admin.from("questions").select(
+      "id, college, subject, part, year, exam, marks, type, topic, subtopic, question",
+      filters.includeTotal ? { count: "exact" } : undefined,
+    ),
     filters,
   )
     .order(filters.sortBy, { ascending: filters.ascending, nullsFirst: false })
     .order("id", { ascending: true })
     .range(offset, offset + pageSize - 1);
+  const optionsPromise = filters.includeOptions ? subjectOptions(admin, filters.subject) : Promise.resolve(undefined);
+  const [result, options] = await Promise.all([resultPromise, optionsPromise]);
 
   if (result.error) return json(request, { error: "Unable to load questions" }, 500);
 
   const questions = result.data ?? [];
-  const total = result.count ?? 0;
+  const total = filters.includeTotal ? result.count ?? 0 : null;
   const page = isPremium ? Math.floor(offset / pageSize) : 0;
-  const hasMore = isPremium && offset + questions.length < total;
+  const hasMore = isPremium && (filters.includeTotal
+    ? offset + questions.length < (total ?? 0)
+    : questions.length === pageSize);
   const payload: Record<string, unknown> = {
     questions,
     total,
@@ -283,13 +298,7 @@ async function handleRequest(request: Request) {
 
   // Filter options are needed for the initial render only. Skipping the
   // auxiliary scan on subsequent pages keeps large premium subjects fast.
-  if (filters.includeOptions) {
-    try {
-      payload.options = await subjectOptions(admin, filters.subject);
-    } catch (error) {
-      return json(request, { error: "Unable to load filter options" }, 500);
-    }
-  }
+  if (filters.includeOptions) payload.options = options;
   return json(request, payload);
 }
 

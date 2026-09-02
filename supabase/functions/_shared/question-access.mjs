@@ -1,7 +1,7 @@
 export const PREVIEW_LIMIT = 10;
 // This is a per-request upper bound, never an entitlement cap. Premium users
 // receive additional pages only after the same authenticated server check.
-export const PREMIUM_PAGE_LIMIT = 250;
+export const PREMIUM_PAGE_LIMIT = 500;
 
 export function hasActiveEntitlement(entitlement, now = new Date()) {
   if (!entitlement || entitlement.status !== "active" || entitlement.revoked_at) {
