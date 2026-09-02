@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="subject.css" />
+    <link rel="stylesheet" href="subject.css?v=plan-details-20260902" />
     <!-- jsPDF — loaded from CDN; swap for local /libs/jspdf.umd.min.js if preferred -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <!-- Supabase SDK -->
@@ -74,10 +74,6 @@
           <button class="btn-dark" id="btn-get-premium" type="button" hidden>
             Get Premium · ₹50
           </button>
-          <div class="referral-control" id="referral-control" hidden>
-            <input id="referral-code" type="text" maxlength="64" placeholder="Referral code" aria-label="Referral code" />
-            <button class="btn-ghost" id="btn-apply-referral" type="button">Apply</button>
-          </div>
           <div class="auth-menu">
             <button id="access-badge" class="btn-ghost" type="button" hidden title=""></button>
             <button id="sign-in-btn" class="btn-dark">Sign In</button>
@@ -404,6 +400,17 @@
       </div>
     </div>
 
+    <div id="access-modal" class="access-modal" role="dialog" aria-modal="true" aria-labelledby="access-modal-title" aria-hidden="true">
+      <div class="access-modal-content">
+        <button class="access-modal-close" id="close-access-modal" type="button" aria-label="Close plan details">&times;</button>
+        <p class="access-modal-kicker">Your RepoMed access</p>
+        <h2 id="access-modal-title">Active plans</h2>
+        <p class="access-modal-intro">These plans are currently active on your account.</p>
+        <div class="access-plan-list" id="access-plan-list"></div>
+        <a class="btn-ghost access-modal-pricing-link" href="pricing.html">View all plans</a>
+      </div>
+    </div>
+
     <!-- ====== FOOTER ====== -->
     <footer class="footer">
       <span class="footer-text">Made with ❤️</span>
@@ -532,6 +539,6 @@
     </script>
 
     <!-- Subject Page Script -->
-    <script src="subject.js?v=access-debug-20260902"></script>
+    <script src="subject.js?v=plan-details-20260902"></script>
   </body>
 </html>

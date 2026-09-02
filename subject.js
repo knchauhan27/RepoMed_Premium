@@ -156,16 +156,6 @@ const PremiumPayment = (() => {
     "PSM/CM": "NEXUS", FM: "NEXUS", ENT: "NEXUS", Ophthal: "NEXUS",
     Medicine: "APEX", Surgery: "APEX", Obstetrics: "APEX", Gynaecology: "APEX", Pediatrics: "APEX",
   };
-  async function validateReferral() {
-    const input = DOM.get("referral-code");
-    const code = input?.value.trim();
-    if (!code) return null;
-    const { data, error } = await supabaseClient.functions.invoke("validate-referral-code", { body: { referralCode: code } });
-    if (error || !data?.valid) throw new Error("Referral code is not valid or unavailable");
-    alert(`Referral ${data.code}: -₹${(data.discountAmount / 100).toFixed(2)}. You pay ₹${(data.finalAmount / 100).toFixed(2)}.`);
-    return { code: data.code, finalAmount: data.finalAmount };
-  }
-
   function updateUi(access) {
     const button = DOM.get("btn-get-premium");
     if (!button) return;
@@ -173,8 +163,6 @@ const PremiumPayment = (() => {
     button.hidden = Boolean(access.isPremium) || !product;
     button.disabled = false;
     button.textContent = `View ${product} plan`;
-    const referralControl = DOM.get("referral-control");
-    if (referralControl) referralControl.hidden = Boolean(access.isPremium);
   }
 
   function renderPreviewCta(access) {
@@ -197,77 +185,12 @@ const PremiumPayment = (() => {
     panel.hidden = false;
   }
 
-  async function startCheckout() {
+  function startCheckout() {
     const button = DOM.get("btn-get-premium");
     if (!button || button.disabled) return;
     const product = subjectProducts[State.get("subject")];
-    if (product) {
-      window.location.href = `checkout.html?product=${encodeURIComponent(product)}`;
-      return;
-    }
-
-    try {
-      button.disabled = true;
-      button.textContent = "Preparing checkout…";
-      const referral = await validateReferral();
-      if (referral?.finalAmount === 0) {
-        const { data, error } = await supabaseClient.functions.invoke("redeem-free-referral", { body: { referralCode: referral.code } });
-        if (error || !data?.premium) throw new Error(await getFunctionErrorMessage(error, "Unable to redeem referral code"));
-        await applyAndRender();
-        alert("Referral redeemed. Premium access is now active.");
-        return;
-      }
-      const { data: order, error: orderError } = await supabaseClient.functions.invoke(
-        "create-razorpay-order",
-        { body: referral ? { referralCode: referral.code } : {} },
-      );
-      if (orderError) throw new Error(await getFunctionErrorMessage(orderError, "Unable to create payment order"));
-      if (!window.Razorpay) throw new Error("Razorpay Checkout did not load. Please refresh and try again.");
-
-      const { data: { session } } = await supabaseClient.auth.getSession();
-      const checkout = new window.Razorpay({
-        key: order.keyId,
-        amount: order.amount,
-        currency: order.currency,
-        name: "RepoMed",
-        description: "Premium access (Test Mode)",
-        order_id: order.razorpayOrderId,
-        prefill: { email: session?.user?.email || "" },
-        theme: { color: "#5b4cf5" },
-        handler: async (paymentResponse) => {
-          try {
-            button.textContent = "Verifying payment…";
-            const { data: verification, error: verificationError } = await supabaseClient.functions.invoke(
-              "verify-razorpay-payment",
-              {
-                body: {
-                  paymentOrderId: order.paymentOrderId,
-                  razorpayPaymentId: paymentResponse.razorpay_payment_id,
-                  razorpayOrderId: paymentResponse.razorpay_order_id,
-                  razorpaySignature: paymentResponse.razorpay_signature,
-                },
-              },
-            );
-            if (verificationError || !verification?.premium) {
-              throw new Error(await getFunctionErrorMessage(verificationError, "Payment verification failed"));
-            }
-            await applyAndRender();
-            alert("Payment verified. Premium access is now active.");
-          } catch (error) {
-            alert(`Payment could not be verified: ${error.message}`);
-          } finally {
-            const access = State.get("access");
-            updateUi(access);
-          }
-        },
-        modal: { ondismiss: () => updateUi(State.get("access")) },
-      });
-      checkout.on("payment.failed", () => updateUi(State.get("access")));
-      checkout.open();
-    } catch (error) {
-      alert(`Unable to start payment: ${error.message}`);
-      updateUi(State.get("access"));
-    }
+    if (!product) return;
+    window.location.href = `checkout.html?product=${encodeURIComponent(product)}`;
   }
 
   function wire() {
@@ -275,13 +198,6 @@ const PremiumPayment = (() => {
     if (button && !button.dataset.listenerAdded) {
       button.dataset.listenerAdded = "true";
       button.addEventListener("click", startCheckout);
-    }
-    const applyButton = DOM.get("btn-apply-referral");
-    if (applyButton && !applyButton.dataset.listenerAdded) {
-      applyButton.dataset.listenerAdded = "true";
-      applyButton.addEventListener("click", async () => {
-        try { await validateReferral(); } catch (error) { alert(error.message); }
-      });
     }
   }
 
@@ -788,6 +704,100 @@ async function loadRemainingPremiumPages(requestId) {
 /* ============================================================
    AUTH UI MANAGEMENT (for subject page)
    ============================================================ */
+let currentEntitlements = [];
+
+function formatAccessDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not available" : date.toLocaleDateString("en-IN", {
+    day: "numeric", month: "short", year: "numeric",
+  });
+}
+
+function renderAccessDetails(entitlements) {
+  const list = document.getElementById("access-plan-list");
+  if (!list) return;
+  list.replaceChildren();
+
+  entitlements.forEach((entry) => {
+    const product = entry.products || {};
+    const card = document.createElement("article");
+    card.className = "access-plan-card";
+
+    const heading = document.createElement("div");
+    heading.className = "access-plan-heading";
+    const name = document.createElement("strong");
+    name.textContent = product.name || product.code || "RepoMed plan";
+    const status = document.createElement("span");
+    status.className = "access-plan-status";
+    status.textContent = "Active";
+    heading.append(name, status);
+
+    const details = document.createElement("dl");
+    details.className = "access-plan-details";
+    const addDetail = (label, value) => {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const definition = document.createElement("dd");
+      definition.textContent = value;
+      details.append(term, definition);
+    };
+    addDetail("Plan", product.code || "—");
+    addDetail("Access until", formatAccessDate(entry.expires_at));
+    if (product.academic_year) addDetail("Academic year", product.academic_year);
+
+    const subjects = Array.isArray(product.product_subjects)
+      ? product.product_subjects.map((item) => item.subject_key).filter(Boolean)
+      : [];
+    const scope = document.createElement("p");
+    scope.className = "access-plan-scope";
+    scope.textContent = product.all_access
+      ? "Includes every subject in the RepoMed repository."
+      : subjects.length
+        ? `Includes: ${subjects.join(", ")}.`
+        : "Subject access is included with this plan.";
+
+    card.append(heading, details, scope);
+    list.append(card);
+  });
+}
+
+function closeAccessModal() {
+  const modal = document.getElementById("access-modal");
+  if (!modal) return;
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function openAccessModal() {
+  if (!currentEntitlements.length) return;
+  const modal = document.getElementById("access-modal");
+  if (!modal) return;
+  renderAccessDetails(currentEntitlements);
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  document.getElementById("close-access-modal")?.focus();
+}
+
+function wireAccessModal() {
+  const badge = document.getElementById("access-badge");
+  const modal = document.getElementById("access-modal");
+  const closeButton = document.getElementById("close-access-modal");
+  if (badge && !badge.dataset.accessListenerAdded) {
+    badge.dataset.accessListenerAdded = "true";
+    badge.addEventListener("click", openAccessModal);
+  }
+  if (closeButton && !closeButton.dataset.accessListenerAdded) {
+    closeButton.dataset.accessListenerAdded = "true";
+    closeButton.addEventListener("click", closeAccessModal);
+  }
+  if (modal && !modal.dataset.accessListenerAdded) {
+    modal.dataset.accessListenerAdded = "true";
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeAccessModal();
+    });
+  }
+}
+
 async function updateAuthUI() {
   try {
     const {
@@ -827,6 +837,10 @@ async function updateAuthUI() {
             signInBtn.style.display = "block";
             userMenu.classList.add("hidden");
             signInBtn.textContent = "Sign In";
+            currentEntitlements = [];
+            const accessBadge = document.getElementById("access-badge");
+            if (accessBadge) accessBadge.hidden = true;
+            closeAccessModal();
 
             alert("Signed out successfully!");
           } catch (error) {
@@ -843,6 +857,8 @@ async function updateAuthUI() {
       userMenu.classList.add("hidden");
       const accessBadge = document.getElementById("access-badge");
       if (accessBadge) accessBadge.hidden = true;
+      currentEntitlements = [];
+      closeAccessModal();
     }
   } catch (error) {
     console.error("Error updating auth UI:", error);
@@ -858,15 +874,23 @@ async function updateEntitlementBadge(session) {
     });
     const payload = await response.json();
     const entitlements = payload?.entitlements || [];
-    if (!entitlements.length) { badge.hidden = true; return; }
+    if (!response.ok) throw new Error(payload?.error || "Unable to load access");
+    currentEntitlements = entitlements;
+    if (!entitlements.length) {
+      badge.hidden = true;
+      badge.classList.remove("access-badge--gold");
+      return;
+    }
     const gold = entitlements.find((entry) => entry.products?.code === "GOLD");
     badge.hidden = false;
     badge.textContent = gold ? "GOLD" : `${entitlements.length} Plan${entitlements.length > 1 ? "s" : ""}`;
-    badge.title = entitlements.map((entry) => `${entry.products?.code || "Plan"}: valid until ${new Date(entry.expires_at).toLocaleDateString("en-IN")}`).join("\n");
-    badge.style.color = gold ? "#9a6700" : "";
+    badge.title = "View active plan details";
+    badge.classList.toggle("access-badge--gold", Boolean(gold));
   } catch (error) {
     console.warn("Unable to load entitlement badge", error);
+    currentEntitlements = [];
     badge.hidden = true;
+    badge.classList.remove("access-badge--gold");
   }
 }
 
@@ -884,6 +908,8 @@ async function init() {
   DOM.get("loading-state").hidden = false;
   DOM.get("questions-list").innerHTML = "";
   DOM.get("empty-state").hidden = true;
+
+  wireAccessModal();
 
   // Check and update authentication status UI
   await updateAuthUI();
