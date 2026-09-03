@@ -144,28 +144,19 @@ async function sha256Hex(value: string) {
 async function validatePremiumDevice(admin: any, userId: string, deviceToken: string) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(deviceToken)) return { allowed: false, status: 403, error: "This premium account needs a registered device" };
   const tokenHash = await sha256Hex(deviceToken);
-  const { data: existing, error: lookupError } = await admin.from("devices").select("id, token_hash, last_seen_at").eq("user_id", userId).is("revoked_at", null).maybeSingle();
-  if (lookupError) {
-    console.error("Unable to look up premium device", { userId, message: lookupError.message });
+  const { data: device, error } = await admin.rpc("bind_premium_device", {
+    p_user_id: userId,
+    p_token_hash: tokenHash,
+    p_label: "browser",
+  });
+  if (error) {
+    console.error("Unable to validate premium device", { userId, message: error.message });
     return { allowed: false, status: 500, error: "Unable to validate this device" };
   }
-  if (existing) {
-    if (existing.token_hash !== tokenHash) return { allowed: false, status: 403, error: "Premium access is limited to one registered device. Replace the existing device to continue." };
-    const lastSeen = Date.parse(existing.last_seen_at ?? "");
-    // The device is authenticated on every request; only the audit timestamp
-    // needs throttling. Avoid a write for every loaded page/filter request.
-    if (Number.isNaN(lastSeen) || Date.now() - lastSeen >= 6 * 60 * 60 * 1000) {
-      const { error } = await admin.from("devices").update({ last_seen_at: new Date().toISOString() }).eq("id", existing.id);
-      return error ? { allowed: false, status: 500, error: "Unable to validate this device" } : { allowed: true };
-    }
-    return { allowed: true };
+  if (!device?.allowed) {
+    return { allowed: false, status: 403, error: "Premium access is limited to two registered devices. Replace an existing device to continue." };
   }
-  const { error: insertError } = await admin.from("devices").insert({ user_id: userId, token_hash: tokenHash, label: "browser" });
-  if (!insertError) return { allowed: true };
-  const { data: raced } = await admin.from("devices").select("token_hash").eq("user_id", userId).is("revoked_at", null).maybeSingle();
-  if (raced?.token_hash === tokenHash) return { allowed: true };
-  console.error("Unable to register premium device", { userId, message: insertError.message });
-  return { allowed: false, status: 500, error: "Unable to validate this device" };
+  return { allowed: true };
 }
 
 async function subjectOptions(admin: any, subject: string) {

@@ -175,7 +175,7 @@ async function handleRequest(request: Request) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(deviceToken)) return json(request, { error: "This premium account needs a registered device" }, 403);
   const { data: device, error: deviceError } = await admin.rpc("bind_premium_device", { p_user_id: userData.user.id, p_token_hash: await sha256Hex(deviceToken), p_label: "browser" });
   if (deviceError) { console.error("Unable to validate export device", { userId: userData.user.id, message: deviceError.message }); return json(request, { error: "Unable to validate this device" }, 500); }
-  if (!device?.allowed) return json(request, { error: "Premium access is limited to one registered device. Replace the existing device to continue." }, 403);
+  if (!device?.allowed) return json(request, { error: "Premium access is limited to two registered devices. Replace an existing device to continue." }, 403);
   const questions = await fetchQuestions(admin, filters);
   if (!questions.length) return json(request, { error: "No questions match the current filters" }, 400);
   const { data: reservation, error: reservationError } = await admin.rpc("reserve_export_slot", { p_user_id: userData.user.id, p_question_count: questions.length, p_filter_snapshot: filters });

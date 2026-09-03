@@ -169,7 +169,8 @@ group by c.id;
 
 Premium question requests carry a randomly generated browser token. The Edge
 Function hashes it, then atomically binds it to the user on first premium use.
-The existing schema's partial unique index permits one active device only.
-Clearing browser storage or signing in from another device is rejected until an
-administrator revokes the old `public.devices` row; no hardware fingerprint,
-IP address, or browser telemetry is collected.
+Each premium account can have two active devices. The first premium request
+binds the current browser; a second distinct browser is allowed. A third is
+rejected until an administrator revokes one of the account's existing
+`public.devices` rows. No hardware fingerprint, IP address, or browser
+telemetry is collected.
