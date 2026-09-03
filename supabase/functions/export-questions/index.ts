@@ -154,6 +154,11 @@ async function fetchQuestions(admin: any, filters: ReturnType<typeof normalizeRe
 
 async function handleRequest(request: Request) {
   if (request.method !== "POST") return json(request, { error: "Method not allowed" }, 405);
+  // Default-deny release switch. This remains server-side so DevTools or a
+  // copied request cannot download PDFs while the UI is hidden.
+  if (Deno.env.get("EXPORTS_ENABLED") !== "true") {
+    return json(request, { error: "Question downloads are temporarily unavailable" }, 503);
+  }
   const authorization = request.headers.get("authorization");
   if (!authorization?.startsWith("Bearer ")) return json(request, { error: "Authentication required" }, 401);
   const url = Deno.env.get("SUPABASE_URL") ?? ""; const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";

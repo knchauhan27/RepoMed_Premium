@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-exports-enabled="false">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -51,7 +51,7 @@
             Filters
             <span class="filter-badge" id="filter-badge"></span>
           </button>
-          <button class="btn-dark" id="btn-export">
+          <button class="btn-dark" id="btn-export" hidden>
             <svg
               width="15"
               height="15"
@@ -320,6 +320,7 @@
     <div
       class="modal-overlay"
       id="export-modal"
+      hidden
       role="dialog"
       aria-modal="true"
       aria-label="Export options"

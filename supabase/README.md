@@ -123,6 +123,14 @@ Do not use an unverified From address, commit the Resend key, or put it in
 browser code. The email is sent only after a captured payment has finalized an
 entitlement, or after a 100%-discount referral redemption has granted access.
 
+## Temporarily disabling question downloads
+
+Exports are currently disabled. The Export control is hidden in `subject.html`,
+and `export-questions` is default-deny server-side, so a copied browser request
+cannot generate a PDF. To re-enable it later: set
+`data-exports-enabled="true"` on the `<html>` element in `subject.html`, then
+set `EXPORTS_ENABLED=true` as a Supabase secret. Both switches must be enabled.
+
 ## Referral-code examples
 
 Run these in the Supabase SQL Editor. Codes are stored uppercase; API input is

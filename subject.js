@@ -20,6 +20,10 @@
 
 "use strict";
 
+// Keep export off by default. Re-enable only alongside the matching Edge
+// Function secret; see supabase/README.md for the two-step release switch.
+const EXPORTS_ENABLED = document.documentElement.dataset.exportsEnabled === "true";
+
 /* ============================================================
    MODULE: App State
    All sets are multi-select; empty set = "All" (no filter).
@@ -560,26 +564,26 @@ const Events = (() => {
     DOM.get("btn-reset-filters").addEventListener("click", doReset);
     DOM.get("btn-reset-empty").addEventListener("click", doReset);
 
-    // ── Export button → shows modal with PDF / CSV choice ──
-    DOM.get("btn-export").addEventListener("click", () => {
-      DOM.get("export-modal").classList.add("open");
-    });
-    DOM.get("modal-close").addEventListener("click", () => {
-      DOM.get("export-modal").classList.remove("open");
-    });
-    DOM.get("export-modal").addEventListener("click", (e) => {
-      if (e.target === DOM.get("export-modal"))
-        DOM.get("export-modal").classList.remove("open");
-    });
-
-    DOM.get("btn-export-pdf").addEventListener("click", () => {
-      DOM.get("export-modal").classList.remove("open");
-      triggerPDFExport();
-    });
-    DOM.get("btn-export-csv").addEventListener("click", () => {
-      DOM.get("export-modal").classList.remove("open");
-      triggerCSVExport();
-    });
+    // ── Export UI is deliberately disabled until both release switches are on.
+    const exportButton = DOM.get("btn-export");
+    const exportModal = DOM.get("export-modal");
+    exportButton.hidden = !EXPORTS_ENABLED;
+    exportModal.hidden = !EXPORTS_ENABLED;
+    if (EXPORTS_ENABLED) {
+      exportButton.addEventListener("click", () => exportModal.classList.add("open"));
+      DOM.get("modal-close").addEventListener("click", () => exportModal.classList.remove("open"));
+      exportModal.addEventListener("click", (e) => {
+        if (e.target === exportModal) exportModal.classList.remove("open");
+      });
+      DOM.get("btn-export-pdf").addEventListener("click", () => {
+        exportModal.classList.remove("open");
+        triggerPDFExport();
+      });
+      DOM.get("btn-export-csv").addEventListener("click", () => {
+        exportModal.classList.remove("open");
+        triggerCSVExport();
+      });
+    }
   }
 
   function setAllTypes(types) {
@@ -601,6 +605,10 @@ function debounce(fn, delay) {
 }
 
 async function triggerPDFExport() {
+  if (!EXPORTS_ENABLED) {
+    alert("Question downloads are temporarily unavailable.");
+    return;
+  }
   const exportButton = DOM.get("btn-export");
   const pdfButton = DOM.get("btn-export-pdf");
   const originalLabel = pdfButton.querySelector("strong")?.textContent || "Export as PDF";
@@ -698,8 +706,11 @@ async function applyAndRender({ includeOptions = !State.get("filterOptionsLoaded
   PremiumPayment.updateUi(response.access);
   PremiumPayment.renderPreviewCta(response.access);
   const exportButton = DOM.get("btn-export");
-  exportButton.disabled = !response.access.isPremium;
-  exportButton.title = response.access.isPremium
+  exportButton.hidden = !EXPORTS_ENABLED;
+  exportButton.disabled = !EXPORTS_ENABLED || !response.access.isPremium;
+  exportButton.title = !EXPORTS_ENABLED
+    ? "Question downloads are temporarily unavailable"
+    : response.access.isPremium
     ? "Export the current filtered results"
     : "Premium access is required to export questions";
   Renderer.renderCards(State.get("allQuestions"), State.get("searchQuery"));
