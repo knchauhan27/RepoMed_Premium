@@ -99,6 +99,30 @@ The handler verifies `X-Razorpay-Signature` against the raw request body before
 parsing JSON, matches the signed captured payment to a local order, and calls
 the same idempotent `finalize_razorpay_payment` RPC used by browser verification.
 
+## Transactional purchase-confirmation email
+
+RepoMed records every purchase-email event in `purchase_emails`. Both browser
+payment verification and Razorpay webhooks may request delivery, but the event
+key and Resend idempotency key ensure a successful payment receives only one
+confirmation email. Email failure is recorded as retryable and never revokes an
+already active entitlement.
+
+Before enabling delivery, verify `repomed.in` as a sending domain in Resend and
+add the exact SPF/DKIM records supplied by Resend in your DNS host. Once Resend
+shows the domain as verified, configure only Edge Function secrets:
+
+```sh
+supabase secrets set \
+  RESEND_API_KEY="re_..." \
+  REPOMED_FROM_EMAIL="noreply@repomed.in" \
+  REPOMED_FROM_NAME="RepoMed" \
+  REPOMED_BASE_URL="https://repomed.in"
+```
+
+Do not use an unverified From address, commit the Resend key, or put it in
+browser code. The email is sent only after a captured payment has finalized an
+entitlement, or after a 100%-discount referral redemption has granted access.
+
 ## Referral-code examples
 
 Run these in the Supabase SQL Editor. Codes are stored uppercase; API input is

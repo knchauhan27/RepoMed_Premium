@@ -3,6 +3,7 @@ import {
   hmacSha256Hex,
   signaturesMatch,
 } from "../_shared/razorpay-payment.mjs";
+import { sendPurchaseConfirmation } from "../_shared/purchase-email.mjs";
 
 function reply(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -141,6 +142,8 @@ async function handle(request: Request) {
     });
     return reply({ error: "Unable to reconcile payment" }, 500);
   }
+
+  await sendPurchaseConfirmation(admin, { razorpayPaymentId });
 
   // The payment ID uniqueness constraint and the finalizer's row lock make
   // duplicate delivery, browser verification, and order.paid converge safely.

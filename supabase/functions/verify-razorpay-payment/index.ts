@@ -5,6 +5,7 @@ import {
   isCapturedPremiumPayment,
   signaturesMatch,
 } from "../_shared/razorpay-payment.mjs";
+import { sendPurchaseConfirmation } from "../_shared/purchase-email.mjs";
 
 const allowedOrigins = new Set(
   (Deno.env.get("ALLOWED_ORIGINS") ?? "https://repomed.in,https://www.repomed.in,http://localhost:5500,http://127.0.0.1:5500")
@@ -160,6 +161,7 @@ async function handle(request: Request) {
     console.error("Unable to finalize payment:", finalizeError);
     return reply(request, { error: "Unable to activate premium access" }, 500);
   }
+  await sendPurchaseConfirmation(admin, { razorpayPaymentId: payment.id });
   return reply(request, { premium: true, alreadyFinalized: finalized?.already_finalized === true });
 }
 
