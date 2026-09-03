@@ -918,20 +918,28 @@ async function updateEntitlementBadge(session) {
     if (!response.ok) throw new Error(payload?.error || "Unable to load access");
     currentEntitlements = entitlements;
     if (!entitlements.length) {
-      badge.hidden = true;
+      badge.hidden = false;
+      badge.disabled = true;
+      badge.textContent = "FREE PLAN";
+      badge.title = "Free plan: preview the first 10 questions in each subject";
       badge.classList.remove("access-badge--gold");
+      badge.classList.add("access-badge--free");
       return;
     }
     const gold = entitlements.find((entry) => entry.products?.code === "GOLD");
     badge.hidden = false;
+    badge.disabled = false;
     badge.textContent = gold ? "GOLD" : `${entitlements.length} Plan${entitlements.length > 1 ? "s" : ""}`;
     badge.title = "View active plan details";
     badge.classList.toggle("access-badge--gold", Boolean(gold));
+    badge.classList.remove("access-badge--free");
   } catch (error) {
     console.warn("Unable to load entitlement badge", error);
     currentEntitlements = [];
     badge.hidden = true;
+    badge.disabled = false;
     badge.classList.remove("access-badge--gold");
+    badge.classList.remove("access-badge--free");
   }
 }
 

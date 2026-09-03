@@ -287,6 +287,10 @@ body {
   color: var(--accent);
 }
 
+.btn-ghost[hidden] {
+  display: none !important;
+}
+
 .filter-badge {
   display: none;
   background: var(--accent);
@@ -1355,6 +1359,17 @@ body {
   color: #9a6700;
   border-color: #f2c94c;
   background: #fff9db;
+}
+
+.access-badge--free {
+  color: var(--accent);
+  border-color: var(--accent-mid);
+  background: var(--accent-light);
+  cursor: default;
+}
+
+.access-badge--free:disabled {
+  opacity: 1;
 }
 
 .access-modal {
